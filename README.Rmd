@@ -1,0 +1,241 @@
+---
+title: "How one year of Trump's 'Liberation Day' tariffs has changed global trade"
+date: "`r Sys.Date()`"
+output:
+  md_document:
+    variant: gfm
+---
+
+# Introduction
+
+One year after the Trump’s "Liberation Day" tariffs, global trade flows have shifted. Trade data shows which countries gained, which lost – and who is footing the bill.
+
+*In this repository, you will find the methodology, data and code behind the stories that came out of this analysis.*
+
+**Read the full story here:** [English](https://p.dw.com/p/xxx) \| [German](https://p.dw.com/p/xxx)
+
+**Story by:** [Kira Schacht](https://www.dw.com/en/kira-schacht/person-46893544)
+
+# Overview
+
+We'll look at US import data provided through [ITC Trade Map](https://www.trademap.org/) to analyze:
+
+-   How overall imports to the US have changed
+-   Which countries have seen additional imports in various phases of the implementation, e.g.: -- January to March 2025: Stockpiling in anticipation of tariffs -- April to July 2025: Import substitution during between announcement (April 2) and implementation (August 7)
+-   Customs duties collected by the US treasury over time, collated by the [Penn Wharton Budget Model](https://budgetmodel.wharton.upenn.edu/data-interactives/real-time-federal-budget-tracker.md/?_inputs_&budget_category=%22Taxes%22&budget_category_mirror=%22Taxes%22&maintabs=%22Tracker%22&budget_item=%22Customs%20Duties%20and%20Related%20Taxes%22&years=%2210%22&cumulative=%22TRUE%22&daily_freq=%22TRUE%22&inflation_adjust=%22TRUE%22&comparison_value=%22Previous%20Year%22&chart_tooltip_show_all=false)
+
+# Analysis
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(root.dir = '/Users/SchachtK/Library/CloudStorage/OneDrive-DeutscheWelle/_Projects/2601 trump tariffs/extern/data') #INSERT YOUR PROJECT DIRECTORY HERE
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(tidyverse)
+```
+
+## Read Data: Monthly US imports
+
+ITC Trade Map provides the monthly import volume to the US by country.
+
+We'll focus on the years 2022-2024 as a baseline for comparison with 2025, since 2021 imports might still have been skewed by the Covid-19 pandemic.
+
+```{r clean-trade-data, echo=FALSE}
+#clean us trade data
+
+#join 3 exported tables from Trade Map together
+lf = list.files("raw", "Trade_Map_-_List_of_supplying_markets_for_a_product_imported_by_United_States_of_America_2", full.names = T)
+d1 = read.delim(lf[1]); d2 = read.delim(lf[2]); d3 = read.delim(lf[3])
+d = full_join(d1, d2) %>% full_join(d3)
+rm(lf, d1, d2, d3)
+
+#clean dataset
+d = d %>%
+  #pivot table to move months to rows instead of columns
+  pivot_longer(2:last_col()) %>% 
+  #remove empty rows
+  filter(name != "X") %>% 
+  #clean month values, separate into year and month category, convert unit to single dollars
+  mutate(date = name %>% gsub("Imported.value.in.","",.) %>% ym,
+         year = date %>% year(),
+         month = date %>% month(),
+         value = value * 1000) %>% 
+  mutate(Exporters = Exporters %>% #fix country names
+           gsub("Taipei, Chinese", "Taiwan", .) %>% 
+           gsub("Korea, Republic of", "South Korea", .) %>% 
+           gsub("Viet Nam", "Vietnam", .)) %>% 
+  filter(year >= 2022) %>% #omit 2021 months
+  select(-name, -date) #remove original date columns
+
+
+#historic import shares 2022-2024
+d_shares_historic = d %>%
+  filter(Exporters != "World", year < 2025) %>% 
+  group_by(Exporters) %>% 
+  summarise(value = sum(value)) %>% 
+  mutate(share = value / sum(value),
+         g1p = share > 0.01)
+#list of countries with historic shares over 1 percent
+countries_g1p = d_shares_historic$Exporters[d_shares_historic$g1p]
+
+save.image("data.RData")
+
+d %>% 
+  mutate(value = value/10^9) %>% head(n = 12) %>%
+  knitr::kable(digits = 2, caption = "data preview, imports to the US in USD bn:")
+```
+
+We'll focus our analysis on the **`r length(countries_g1p)`** countries that trade the most with the US (make up at least 1% of US imports between 2022 and 2024):
+
+**`r paste(countries_g1p, collapse = ", ")`**
+
+## Total US import deviations
+
+We'll compare total monthly US import values for 2025 to the average in the corresponding months of 2022-2024. The results show that total import values to the US briefly rose in early 2025, then returned to normal. We'll export this result to `trademap_us_imports_deviation.csv`.
+
+```{r imports-deviation}
+# us imports 2025 deviation from average
+d1_total_deviation = d %>%
+  filter(Exporters == "World") %>% 
+  select(-Exporters) %>% 
+  mutate(tmp = ifelse(year == 2025, "2025", "average")) %>% 
+  group_by(tmp, month) %>% 
+  summarise(value = mean(value)) %>% 
+  pivot_wider(names_from = tmp, values_from = value) %>% 
+  mutate(deviation = `2025`-average,
+         month = month(month, label = T))
+
+write.csv(d1_total_deviation, "processed/trademap_us_imports_deviation.csv",na = "", row.names = F)
+
+d1_total_deviation %>% 
+  mutate_at(2:4, ~./10^9) %>% 
+  knitr::kable(digits = 2, caption = "Q1 additional imports, in USD bn")
+```
+
+## Q1 2025: Import Surges by country
+
+In early 2025, anticipation of tariffs led US importers to stockpile goods from many trading partners. Focusing on the countries with more than 1% average import share to the US, we'll show the magnitude of additional imports in Q1 2025 compared to the average of Q1 2022-2024 per country.
+
+The result is exported to `trademap_us_exporters_deviation_Q1.csv`
+
+```{r q1-surges}
+# countries with the biggest import surges:
+# Q1 2025 vs average of Q1 2022-2024
+d2_q1_deviation = d %>%
+  filter(month <= 3, Exporters %in% countries_g1p) %>% 
+  #sum Q1 of each year
+  group_by(Exporters, year) %>% 
+  summarise(value = sum(value)) %>% 
+  #compare Q1 2025 with previous years
+  mutate(tmp = ifelse(year == 2025, "Q1_2025", "Q1_average")) %>%
+  group_by(Exporters, tmp) %>% 
+  summarise(value = mean(value)) %>% 
+  #restructure to move years to columns
+  pivot_wider(names_from = tmp, values_from = value) %>% 
+  #calculate absolute deviation and percentage change
+  mutate(deviation = Q1_2025 - Q1_average,
+         change_percent = Q1_2025 / Q1_average)
+
+write.csv(d2_q1_deviation, "processed/trademap_us_exporters_deviation_Q1.csv",na = "", row.names = F)
+
+d2_q1_deviation %>% 
+  arrange(desc(deviation)) %>% 
+  head(10) %>% 
+  mutate_at(2:4, ~./10^9) %>% 
+  knitr::kable(digits = 2, caption = "Q1 additional imports, in USD bn")
+```
+
+## April-July 2025: Import shifts during tariff pause
+
+Between the announcement of tariffs on April 2 and their implementation in August, importers tried to shift to lower-tariff countries.
+
+We'll show the resulting shift in imports on a map, the data of which is exported in `trademap_us_exporters_deviation_Apr_Jul.csv`
+
+```{r apr-jul-surges}
+# countries with the biggest import surges during tariff pause:
+# Apr-Jul 2025 vs average of Apr-Jul 2022-2024
+d3_apr_jul_deviation = d %>%
+  filter(month %in% 4:7) %>% 
+  group_by(Exporters, year) %>% #sum months of each year
+  summarise(value = sum(value)) %>% 
+  mutate(tmp = ifelse(year == 2025, "AJ_2025", "AJ_average")) %>% 
+  group_by(Exporters, tmp) %>% 
+  summarise(value = mean(value)) %>% 
+  pivot_wider(names_from = tmp, values_from = value) %>% 
+  mutate(deviation = AJ_2025 - AJ_average,
+         change_percent = AJ_2025 / AJ_average)
+
+write.csv(d3_apr_jul_deviation,  "processed/trademap_us_exporters_deviation_Apr_Jul.csv", na = "", row.names = F)
+
+d3_apr_jul_deviation %>% 
+  arrange(desc(deviation)) %>% 
+  head(12) %>% 
+  mutate_at(2:4, ~./10^9) %>% 
+  knitr::kable(digits = 2, caption = "April-July change in imports, in USD bn")
+```
+
+## Monthly import changes in 2025
+
+For a view of the year 2025 in total, we'll show the monthly deviation from the 2022-2024 average for all countries with at least 1% historic import share.
+
+```{r monthly-changes}
+# import change in total value during 2025 compared to 2022-2024 average
+# countries with at least 1 percent market share
+tmp = d %>% filter(Exporters %in% countries_g1p) %>% 
+  mutate(tmp = ifelse(year == 2025, "2025", "average")) %>% 
+  group_by(Exporters, month, tmp) %>% 
+  summarise(value = mean(value)) %>% 
+  pivot_wider(names_from = tmp, values_from = value) %>% 
+  mutate(deviation = `2025` - average) %>% 
+  select(Exporters, month, deviation) %>% 
+  arrange(desc(deviation))
+
+#get order of countries: biggest to smallest deviation april-july
+tmp_countries = tmp %>%
+  filter(month %in% 4:7) %>% group_by(Exporters) %>%
+  summarise(deviation = sum(deviation)) %>% arrange(desc(deviation)) %>%
+  select(Exporters) %>% `[[`(1)
+
+d4_monthly_deviation = tmp %>% 
+  mutate(Exporters = factor(Exporters, levels = tmp_countries),
+         month = month(month, label = T)) %>% 
+  arrange(Exporters) %>% 
+  pivot_wider(names_from = Exporters, values_from = deviation)
+rm(tmp,tmp_countries)
+
+write.csv(d4_monthly_deviation, "processed/trademap_us_exporters_deviation_monthly.csv",na = "", row.names = F)
+
+d4_monthly_deviation %>% 
+  select(1:10) %>% 
+  mutate_at(2:10, ~./10^9) %>% 
+  knitr::kable(digits = 2, caption = "Preview: Monthly deviations by country, in USD bn")
+```
+
+## Penn Wharton Budget Model: Customs duties collected by US Treasury
+
+`pennwharton_budget_model_taxes.csv` shows weekly amounts of customs duties collected by the US, processed from the data source for visualization.
+
+```{r clean-penn-wharton}
+# create a dataframe of week start dates for 2025
+weekdates = read.csv("raw/Taxes_Customs Duties and Related Taxes_Weekly_2016-2026.csv") %>% 
+  filter(Year == 2025) %>% 
+  select(Week, Date)
+
+d5_cutoms_duties = read.csv("raw/Taxes_Customs Duties and Related Taxes_Weekly_2016-2026.csv") %>% 
+  select(Year, Week, Amount_YTD_Adj) %>% 
+  #append dates to week numbers
+  left_join(weekdates, by = join_by(Week)) %>%
+  #clean data
+  filter(!is.na(Date)) %>% arrange(Year, Week) %>% select(-Week) %>% 
+  #one column per year
+  pivot_wider(names_from = Year, values_from = Amount_YTD_Adj) %>% 
+  #let the first week of 2025 begin in January instead of December
+  mutate(Date = gsub("2025-12-31","2025-01-01",Date))
+
+write.csv(d5_cutoms_duties, "processed/pennwharton_budget_model_taxes.csv",
+          row.names = F, na = "")
+rm(weekdates)
+
+```
